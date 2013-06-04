@@ -1,0 +1,238 @@
+﻿<#@ template language="C#" hostspecific="true"#>
+<#@ output extension=".xml" #>
+<#@ assembly name="System.Core" #>
+<#@ assembly name="System.Data" #>
+<#@ assembly name="System.Data.Entity" #>
+<#@ assembly name="System.Data.Entity.Design" #>
+<#@ assembly name="System.Xml" #>
+<#@ assembly name="System.Xml.Linq" #>
+<#@ assembly name="EnvDTE" #>
+<#@ assembly name="EnvDTE80" #>
+<#@ assembly name="Microsoft.VisualStudio.Shell.Interop.8.0" #>
+<#@ import namespace="System" #>
+<#@ import namespace="System.IO" #>
+<#@ import namespace="System.Diagnostics" #>
+<#@ import namespace="System.Text" #>
+<#@ import namespace="System.Collections.Generic" #>
+<#@ import namespace="System.Xml" #>
+<#@ import namespace="System.Xml.Linq" #>
+<#@ import namespace="System.Linq" #>
+<#@ import namespace="Microsoft.VisualStudio.Shell.Interop" #>
+<#@ import namespace="EnvDTE" #>
+<#@ import namespace="EnvDTE80" #>
+<# 
+    try { WriteDocument(); }
+    catch (Exception e) { this.Error(e.ToString()); }
+    // All done! 
+#>
+<#+
+    XNamespace edmxns = "http://schemas.microsoft.com/ado/2007/06/edmx";
+    XNamespace csdlns = "http://schemas.microsoft.com/ado/2006/04/edm";
+    XNamespace mslns = "urn:schemas-microsoft-com:windows:storage:mapping:CS";
+    XNamespace ssdlns = "http://schemas.microsoft.com/ado/2006/04/edm/ssdl";
+
+    XDocument doc = null;
+    private string AssemblyName = string.Empty;
+    private string NameSpaceName = string.Empty;
+
+
+    private void WriteDocument() 
+    { 
+        // Find EDMX file to process: Model1.Views.tt generates views for Model1.EDMX 
+        string edmxFileName = Path.GetFileNameWithoutExtension(this.Host.TemplateFile).ToLowerInvariant().Replace(".hbm", "") + ".edmx"; 
+        string edmxFilePath = Path.Combine(Path.GetDirectoryName(this.Host.TemplateFile), edmxFileName); 
+        if (!File.Exists(edmxFilePath)) 
+            throw new Exception(String.Format("No views were generated. Cannot find file {0}. Ensure the project has an EDMX file and the file name of the .tt file is of the form [edmx-file-name].Views.tt", edmxFilePath)); 
+
+        doc = XDocument.Load(edmxFilePath);
+        if (doc == null) 
+            throw new XmlException("XML document could not be opened.");
+
+        XElement conceptual = doc.Element(edmxns + "Edmx").Element(edmxns + "Runtime").Element(edmxns + "ConceptualModels").Element(csdlns + "Schema");
+        XElement mapping = doc.Element(edmxns + "Edmx").Element(edmxns + "Runtime").Element(edmxns + "Mappings").Element(mslns + "Mapping").Element(mslns + "EntityContainerMapping");
+        XElement storage = doc.Element(edmxns + "Edmx").Element(edmxns + "Runtime").Element(edmxns + "StorageModels").Element(ssdlns + "Schema");
+
+		AssemblyName = GetAssemblyName(); // etwas tricky: der Assembly Name des Projekts
+        NameSpaceName = (string) conceptual.Attribute("Namespace");
+
+#>
+<?xml version="1.0" encoding="utf-8" ?>
+<hibernate-mapping xmlns="urn:nhibernate-mapping-2.2">
+<#+
+        WriteTables(conceptual, mapping, storage);
+#></hibernate-mapping>
+
+<#+
+    }
+
+    private void WriteTables(XElement conceptual, XElement mapping, XElement storage)
+    {
+        foreach (XElement mappingTable in mapping.Descendants(mslns + "EntitySetMapping"))
+        {
+            string storageTableName = (string) mappingTable.Attribute("Name");
+            string conceptualTableName = mappingTable.Element(mslns + "EntityTypeMapping").Attribute("TypeName").Value.Split(new char[] { '.' })[1];
+            // Extract NameSpace
+
+            XElement conceptualTable = conceptual.Descendants(csdlns + "EntityType").Where(p => p.Attribute("Name").Value == conceptualTableName).FirstOrDefault();
+            if (conceptualTable == null) throw new XmlException("Invalid edmx format.");
+
+
+            XElement storageTable = storage.Descendants(ssdlns + "EntityType").Where(p => p.Attribute("Name").Value == storageTableName).FirstOrDefault();
+            if (storageTable == null) throw new XmlException("Invalid edmx format.");
+
+#>  <class name="<#=NameSpaceName#>.DTO.<#=conceptualTableName#>, <#=AssemblyName#>" table="<#=storageTableName#>" lazy="false" >
+<#+
+            WriteTable(storageTableName, conceptualTable, mappingTable, storageTable);
+#>  </class>
+<#+
+        }
+    }
+
+    private void WriteTable(string storageTableName, XElement conceptual, XElement mapping, XElement storage)
+    {
+        mapping = mapping.Element(mslns + "EntityTypeMapping").Element(mslns + "MappingFragment");
+        WriteFields(conceptual, mapping, storage);
+        WriteAssociations(storageTableName, storage.Parent); // Muß wieder eine Stufe nach oben!
+    }
+
+    private void WriteFields(XElement conceptual, XElement mapping, XElement storage)
+    {
+        foreach (XElement element in mapping.Descendants(mslns + "ScalarProperty"))
+        {
+            string conceptualName = (string) element.Attribute("Name");
+            string storageName = (string) element.Attribute("ColumnName");
+
+            // Check if field is an index and consistent
+            bool isID = (conceptual.Descendants(csdlns + "Key").Where(p => (p.Element(csdlns + "PropertyRef").Attribute("Name").Value == conceptualName)).Count() > 0);
+            if (isID)
+            {
+                isID = (storage.Descendants(ssdlns + "Key").Where(p => (p.Element(ssdlns + "PropertyRef").Attribute("Name").Value == storageName)).Count() > 0);
+                if (!isID) throw new XmlException("Inconsistent key definition.");
+            }
+
+            XElement conceptualField = conceptual.Descendants(csdlns + "Property").Where(p => p.Attribute("Name").Value == conceptualName).FirstOrDefault();
+            if (conceptualField == null) throw new XmlException("Inconsistent field definition.");
+
+            XElement storageField = storage.Descendants(ssdlns + "Property").Where(p => p.Attribute("Name").Value == storageName).FirstOrDefault();
+            if (storageField == null) throw new XmlException("Inconsistent field definition.");
+            
+            WriteField(isID, conceptualField, storageField);
+        }
+    }
+
+    private void WriteField(bool isID, XElement conceptual, XElement storage)
+    {
+        string tagName = isID ? "id" : "property";
+
+#>
+    <<#=tagName#> name="<#= conceptual.Attribute("Name").Value#>"<#+
+        if (isID && conceptual.Attribute("Type").Value == "String") { #> type="AnsiString"<#+ } #>>
+      <column name="<#=storage.Attribute("Name").Value#>"<#+
+        if (storage.Attribute("MaxLength") != null) { #> length="<#=storage.Attribute("MaxLength").Value#>"<#+ }
+        if (storage.Attribute("Type") != null) { #> sql-type="<#=storage.Attribute("Type").Value#>"<#+  }
+        #>/>
+<#+ 
+        if (isID)
+        {
+#>
+      <generator class="assigned"/>
+<#+
+        }
+ #>
+    </<#= tagName#>>
+<#+
+    }
+
+    private void WriteAssociations(string storageTableName, XElement storage)
+    {
+        foreach (XElement element in storage.Descendants(ssdlns + "Association"))
+            WriteAssociation(storageTableName, element);
+    }
+
+    private void WriteAssociation(string storageTableName, XElement storage)
+    {
+        XElement endElement1 = null, endElement2 = null;
+        foreach (XElement element in storage.Descendants(ssdlns + "End"))
+        {
+            if (endElement1 == null)
+                endElement1 = element;
+            else if (endElement2 == null)
+            {
+                endElement2 = element;
+                break;
+            }
+        }
+
+        if (endElement2 == null) throw new XmlException("Not all end points for association defined.");
+
+        XElement ownElement = null, otherElement = null;
+        if (endElement1.Attribute("Role").Value == storageTableName)
+        {
+            ownElement = endElement1;
+            otherElement = endElement2;
+        }
+        else if (endElement2.Attribute("Role").Value == storageTableName)
+        {
+            ownElement = endElement2;
+            otherElement = endElement1;
+        }
+
+        if (ownElement == null) return; // Association is not part of the table defined in storageTableName
+
+        string propertyRefName = string.Empty;
+        try { propertyRefName = storage.Element(ssdlns + "ReferentialConstraint").Element(ssdlns + "Principal").Element(ssdlns + "PropertyRef").Attribute("Name").Value; }
+        catch { throw new XmlException("No reference specified for association."); }
+
+        switch (otherElement.Attribute("Multiplicity").Value)
+        {
+        case "*":
+#>
+    <bag name="<#=otherElement.Attribute("Role").Value#>" inverse="true" lazy="true"<#+ 
+            bool isCascaded = false;
+            try { isCascaded = ownElement.Element(ssdlns + "OnDelete").Attribute("Action").Value == "Cascade"; }
+            catch {}
+            if (isCascaded) { #> cascade="all"<#+  }
+            #>>
+        <key column="<#=propertyRefName#>"/>
+        <one-to-many class="<#=NameSpaceName#>.DTO.<#=GetConceptualTableName(otherElement.Attribute("Role").Value)#>, <#=AssemblyName#>"/>
+    </bag>
+<#+
+                break;
+        case "0..1":
+#>
+    <many-to-one name="<#=GetConceptualTableName(otherElement.Attribute("Role").Value)#>" class="<#= NameSpaceName#>.DTO.<#=GetConceptualTableName(otherElement.Attribute("Role").Value)#>, <#=AssemblyName#>">
+      <column name="<#=propertyRefName#>" length="5" sql-type="nchar" not-null="false" index="<#=propertyRefName#>"/>
+    </many-to-one>
+<#+
+                break;
+        }
+    }
+
+    ////////////////////////////////////////////////////////////////////////////
+    /// Helper methods
+    ////////////////////////////////////////////////////////////////////////////
+
+    string GetAssemblyName() 
+    {
+        var serviceProvider = Host as IServiceProvider;
+        if (serviceProvider == null) return string.Empty;
+    
+        var dte = serviceProvider.GetService(typeof(SDTE)) as DTE;
+        // Find the .tt file's ProjectItem
+        ProjectItem projectItem = dte.Solution.FindProjectItem(Host.TemplateFile);
+        return projectItem.ContainingProject.Properties.Item("AssemblyName").Value.ToString();
+    }
+
+    private string GetConceptualTableName(string storageTableName)
+    {
+        XElement root = doc.Element(edmxns + "Edmx").Element(edmxns + "Runtime").Element(edmxns + "ConceptualModels").Element(csdlns + "Schema").Element(csdlns + "EntityContainer");
+        foreach (XElement element in root.Descendants(csdlns + "EntitySet").Where(p => p.Attribute("Name").Value == storageTableName))
+        {
+            return element.Attribute("EntityType").Value.Split(new char[] {'.'})[1];
+        }
+
+        return string.Empty;
+    }
+
+
+#>

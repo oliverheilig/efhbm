@@ -1,0 +1,425 @@
+﻿<#@ template language="C#" hostspecific="true"#>
+<#@ output extension=".xml" #>
+<#@ assembly name="System.Core" #>
+<#@ assembly name="System.Data" #>
+<#@ assembly name="System.Data.Entity" #>
+<#@ assembly name="System.Data.Entity.Design" #>
+<#@ assembly name="System.Xml" #>
+<#@ assembly name="System.Xml.Linq" #>
+<#@ assembly name="EnvDTE" #>
+<#@ assembly name="EnvDTE80" #>
+<#@ assembly name="Microsoft.VisualStudio.Shell.Interop.8.0" #>
+<#@ import namespace="System" #>
+<#@ import namespace="System.IO" #>
+<#@ import namespace="System.Diagnostics" #>
+<#@ import namespace="System.Text" #>
+<#@ import namespace="System.Collections.Generic" #>
+<#@ import namespace="System.Data.Entity.Design" #>
+<#@ import namespace="System.Data.Metadata.Edm" #>
+<#@ import namespace="System.Data.Mapping" #>
+<#@ import namespace="System.Xml" #>
+<#@ import namespace="System.Xml.Linq" #>
+<#@ import namespace="System.Linq" #>
+<#@ import namespace="System.CodeDom" #>
+<#@ import namespace="System.CodeDom.Compiler" #>
+<#@ import namespace="Microsoft.VisualStudio.Shell.Interop" #>
+<#@ import namespace="EnvDTE" #>
+<#@ import namespace="EnvDTE80" #>
+<# 
+    // Find EDMX file to process: Model1.Views.tt generates views for Model1.EDMX 
+    string edmxFileName = Path.GetFileNameWithoutExtension(this.Host.TemplateFile).ToLowerInvariant().Replace(".hbm", "") + ".edmx"; 
+    string edmxFilePath = Path.Combine(Path.GetDirectoryName(this.Host.TemplateFile), edmxFileName); 
+    if (File.Exists(edmxFilePath)) 
+    { 
+        // Call helper class to generate pre-compiled views and write to output 
+        GenerateHbm(edmxFilePath); 
+    } 
+    else 
+    { 
+        this.Error(String.Format("No views were generated. Cannot find file {0}. Ensure the project has an EDMX file and the file name of the .tt file is of the form [edmx-file-name].Views.tt", edmxFilePath)); 
+    } 
+    // All done! 
+#>
+<#+
+    private void GenerateHbm(string edmxFilePath) 
+    { 
+        String generatedViews = String.Empty; 
+
+        XmlReader csdlReader = null; 
+        XmlReader mslReader = null; 
+        XmlReader ssdlReader = null;
+
+        // Crack open the EDMX file and get readers over the CSDL, MSL and SSDL portions 
+        GetConceptualMappingAndStorageReaders(edmxFilePath, out csdlReader, out mslReader, out ssdlReader);
+
+        // Initialize item collections 
+        EdmItemCollection edmItems = new EdmItemCollection(new XmlReader[] { csdlReader }); 
+//      StoreItemCollection storeItems = new StoreItemCollection(new XmlReader[] { ssdlReader }); 
+//      StorageMappingItemCollection mappingItems = new StorageMappingItemCollection(edmItems, storeItems, new XmlReader[] { mslReader });
+
+		var edm = new ItemCollectionWrapper<EdmItemCollection>(edmItems);
+//		var mapping = new ItemCollectionWrapper<MappingItemCollection>(mappingItems); // bei der Mapping-Klasse ist alles internal!
+		var mapping = XDocument.Load(mslReader);  // lade das xml direkt über linq	
+
+		// etwas tricky: der Assembly Name des Projekts
+		string assemblyName = GetAssemblyName();
+#>
+<?xml version="1.0" encoding="utf-8" ?>
+<hibernate-mapping xmlns="urn:nhibernate-mapping-2.2">
+<#+
+	    foreach(EntityType entity in edm.AllEntities.OrderBy(e => e.FullName))
+	    {
+		    // hole dir den Tabellennamen per Linq
+	        var setMapping = (from node in mapping.Descendants()
+                              where node.Name.LocalName == "EntityTypeMapping" &&
+                              node.Attributes("TypeName").FirstOrDefault().Value == entity.FullName
+                              select node).FirstOrDefault();
+            var fragment = (from node in setMapping.Descendants()
+                            where node.Name.LocalName == "MappingFragment" select node).FirstOrDefault();
+            string tableName = fragment.Attributes("StoreEntitySet").FirstOrDefault().Value;
+#>	 
+  <class name="<#=edm.NamespaceName#>.DTO.<#=entity.Name#>, <#=assemblyName#>" table="<#=tableName#>" lazy="false" >
+<#+
+		foreach(EdmProperty property in entity.Properties.Where(p => p.DeclaringType == entity && p.TypeUsage.EdmType is PrimitiveType))
+		{
+	        bool isKeyProperty = ((EntityType)property.DeclaringType).KeyMembers.Contains(property);
+			if(isKeyProperty)
+            {
+#>
+	    <id name="<#=property.Name#>" >
+	      <generator class="assigned" />
+	    </id>
+<#+
+            }
+			else
+            {
+#>
+		<property name="<#=property.Name#>"/>	
+<#+
+            }
+		}
+		foreach(NavigationProperty navProperty in entity.NavigationProperties.Where(n => n.DeclaringType == entity))
+		{
+			string elementType = GetEntityType(navProperty.ToEndMember).Name;
+			string relationshipName = navProperty.ToEndMember.DeclaringType.FullName;
+			string targetRoleName = navProperty.ToEndMember.Name;
+#>	
+<#+
+	        if(navProperty.ToEndMember.RelationshipMultiplicity == RelationshipMultiplicity.Many)
+	        {
+#>
+    <bag name="Orders" inverse="true" lazy="true" cascade="all">
+      <key column="CustomerID"/>
+      <one-to-many class="NORTHWINDModel.DTO.Order, T4DawnBO"/>
+    </bag>
+<#+
+	       }
+	       else
+	       {
+#>
+    <many-to-one name="Customer" class="NORTHWINDModel.DTO.Customer, T4DawnBO">
+      <column name="CustomerID" length="5" sql-type="nchar" not-null="false" index="CustomerID"/>
+    </many-to-one>
+<#+
+			}
+
+        }
+#>
+  </class>
+<#+
+        } 
+#>	 
+</hibernate-mapping>
+<#+
+    }
+
+    private void GetConceptualMappingAndStorageReaders(string edmxFile, out XmlReader csdlReader, out XmlReader mslReader, out XmlReader ssdlReader) 
+    { 
+        csdlReader = null; 
+        mslReader = null; 
+        ssdlReader = null;
+
+        XNamespace edmxns = "http://schemas.microsoft.com/ado/2007/06/edmx"; 
+        XNamespace csdlns = "http://schemas.microsoft.com/ado/2006/04/edm"; 
+        XNamespace mslns = "urn:schemas-microsoft-com:windows:storage:mapping:CS"; 
+        XNamespace ssdlns = "http://schemas.microsoft.com/ado/2006/04/edm/ssdl";
+
+        XDocument edmxDoc = XDocument.Load(edmxFile); 
+
+        if (edmxDoc != null) 
+        { 
+            XElement edmxNode = edmxDoc.Element(edmxns + "Edmx"); 
+            if (edmxNode != null) 
+            { 
+                XElement runtimeNode = edmxNode.Element(edmxns + "Runtime"); 
+                if (runtimeNode != null) 
+                { 
+                    // Create XmlReader over CSDL in EDMX 
+                    XElement conceptualModelsNode = runtimeNode.Element(edmxns + "ConceptualModels"); 
+                    if (conceptualModelsNode != null) 
+                    { 
+                        XElement csdlContent = conceptualModelsNode.Element(csdlns + "Schema"); 
+                        if (csdlContent != null) 
+                        { 
+                            csdlReader = csdlContent.CreateReader(); 
+                        } 
+                    }
+
+                    // Create XmlReader over MSL in EDMX 
+                    XElement mappingsNode = runtimeNode.Element(edmxns + "Mappings"); 
+                    if (mappingsNode != null) 
+                    { 
+                        XElement mslContent = mappingsNode.Element(mslns + "Mapping"); 
+                        if (mslContent != null) 
+                        { 
+                            mslReader = mslContent.CreateReader(); 						
+                        } 
+                    }
+
+                    // Create XmlReader over SSDL in EDMX 
+                    XElement storageModelsNode = runtimeNode.Element(edmxns + "StorageModels"); 
+                    if (storageModelsNode != null) 
+                    { 
+                        XElement ssdlContent = storageModelsNode.Element(ssdlns + "Schema"); 
+                        if (ssdlContent != null) 
+                        { 
+                            ssdlReader = ssdlContent.CreateReader(); 
+                        } 
+                    } 
+                } 
+            } 
+        } 
+    } 
+#>
+
+
+<#+
+////////
+//////// UTILITY METHODS - do not modify anything below this point
+////////
+
+//
+// Code for building up a convenient item collection for the CSDL from the EDMX
+//
+
+private ItemCollectionWrapper<EdmItemCollection> GetEdmItemCollection(string edmxFile)
+{
+    EdmItemCollection edmItems = new EdmItemCollection(new XmlReader[] { GetCSDLReader(edmxFile) });
+    return new ItemCollectionWrapper<EdmItemCollection>(edmItems);
+}
+
+private XmlReader GetCSDLReader(string edmxFile)
+{
+    XNamespace edmxns = "http://schemas.microsoft.com/ado/2007/06/edmx";
+    XNamespace csdlns = "http://schemas.microsoft.com/ado/2006/04/edm";
+
+    XDocument edmxDoc = XDocument.Load(edmxFile);
+    XElement edmxNode = edmxDoc.Element(edmxns + "Edmx");
+    XElement runtimeNode = edmxNode.Element(edmxns + "Runtime");
+    XElement conceptualModelsNode = runtimeNode.Element(edmxns + "ConceptualModels");
+    XElement csdlContent = conceptualModelsNode.Element(csdlns + "Schema");
+    return csdlContent.CreateReader();
+}
+
+public class ItemCollectionWrapper<T>  where T : ItemCollection
+{
+    T _collection;
+    public ItemCollectionWrapper(T collection)
+    {
+        _collection = collection;
+    }
+
+    public T Collection { get{ return _collection; }}
+
+    public IEnumerable<EntityContainer> AllEntityContainers
+    {
+        get
+        {
+            return _collection.GetItems<EntityContainer>();
+        }
+    }
+
+    public IEnumerable<EntityType> AllEntities
+    {
+        get
+        {
+            return _collection.GetItems<EntityType>();
+        }
+    }
+
+    public IEnumerable<AssociationType> AllAssociations
+    {
+        get
+        {
+            return _collection.GetItems<AssociationType>();
+        }
+    }
+    
+    public string NamespaceName
+	{
+		get
+		{
+			EntityType type = this.AllEntities.FirstOrDefault(e => e.NamespaceName != null);
+			if (type != null && type.NamespaceName != null)
+			{
+				return type.NamespaceName;
+			}
+			return null;
+		}
+	}
+}
+
+//
+// Convenience methods
+//
+
+public EntityType GetEntityType(RelationshipEndMember end)
+{
+    return (EntityType)((RefType)end.TypeUsage.EdmType).ElementType;
+}
+
+public string GetEnumValueString(object enumValue)
+{
+    Type type = enumValue.GetType();
+    Debug.Assert(type.IsEnum, "this type is not an enum");
+
+    return type.FullName + "." + enumValue.ToString();
+}
+
+bool IncludePropertyInFactoryMethod(EdmProperty property)
+{
+	if (property.Nullable)
+    {
+		return false;
+    }
+    if (property.DefaultValue != null)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+string GetSetValidValueParameters(PrimitiveType type, bool nullable)
+{
+	string parameters = "value";
+	if(type.ClrEquivalentType.IsClass)
+		parameters += ", " + nullable.ToString().ToLower();
+		
+	return parameters;
+}
+
+//
+// language specific code generation classes
+//
+	
+abstract class CodeLanguage 
+{
+	protected CodeDomProvider CodeDomProvider { get; set; }
+	
+	protected CodeLanguage(CodeDomProvider codeDomProvider) 
+	{
+		CodeDomProvider = codeDomProvider;
+	}
+	
+	public String Format(Type type) 
+	{
+		return ShortenTypeRef(CodeDomProvider.GetTypeOutput(new CodeTypeReference(type)));
+	}
+	
+	public String Format(TypeUsage typeUsage)
+	{
+		if(typeUsage.EdmType is ComplexType)
+		{
+			return typeUsage.EdmType.Name;
+		}
+		else if (typeUsage.EdmType is PrimitiveType)
+		{
+			Type clrType = ((PrimitiveType)typeUsage.EdmType).ClrEquivalentType;
+			string elementType = Format(clrType);
+			if(clrType.IsValueType && IsNullable(typeUsage))
+			{
+				return elementType + "?";
+			}
+			return elementType;
+		}
+		
+		return "UnknownType";
+	}
+	
+	public String FormatIdentifier(string identifier)
+	{
+		return CodeDomProvider.CreateEscapedIdentifier(identifier);
+	}
+	
+	public string FormatParameter(string identifier)
+	{
+		return FormatIdentifier(CamelCase(identifier));
+	}
+	
+	public string FormatField(string identifier)
+	{
+		return FormatIdentifier("_" + identifier);
+	}
+	
+	protected string CamelCase(string identifier)
+	{
+		if (string.IsNullOrEmpty(identifier))
+			return identifier;
+
+		if (identifier.Length == 1)
+			return identifier[0].ToString(System.Globalization.CultureInfo.InvariantCulture).ToLowerInvariant();
+
+		return identifier[0].ToString(System.Globalization.CultureInfo.InvariantCulture).ToLowerInvariant() + identifier.Substring(1);
+	}
+	
+	protected virtual String ShortenTypeRef(String typeRef) 
+	{
+		return (typeRef.LastIndexOf('.') != 6) ? typeRef.Replace("System.Data.Linq.","") : typeRef.Replace("System.","");
+	}
+	
+	protected String Format(CodeTypeReference codeTypeRef) 
+	{
+		return ShortenTypeRef(CodeDomProvider.GetTypeOutput(codeTypeRef));
+	}
+	
+	protected bool IsNullable(TypeUsage typeUsage)
+	{
+		return (bool)typeUsage.Facets["Nullable"].Value;
+	}
+}
+
+class CSharpCodeLanguage : CodeLanguage 
+{
+	public CSharpCodeLanguage() : base(new Microsoft.CSharp.CSharpCodeProvider()) { }
+
+	protected override String ShortenTypeRef(String typeRef) 
+	{
+		if (typeRef.StartsWith("System.Nullable<"))
+			typeRef = typeRef.Replace("System.Nullable<","").Replace(">","?");
+		return base.ShortenTypeRef(typeRef);
+	}
+}
+
+class VBCodeLanguage : CodeLanguage 
+{
+	public VBCodeLanguage() : base(new Microsoft.VisualBasic.VBCodeProvider()) { }
+}
+
+string GetAssemblyName() {
+    var serviceProvider = Host as IServiceProvider;
+        if (serviceProvider != null) {
+            var dte = serviceProvider.GetService(typeof(SDTE)) as DTE;
+
+
+    // Find the .tt file's ProjectItem
+    ProjectItem projectItem = dte.Solution.FindProjectItem(Host.TemplateFile);
+
+
+	return projectItem.ContainingProject.Properties.Item("AssemblyName").Value.ToString();
+
+
+        }
+		else return "";
+}
+#>

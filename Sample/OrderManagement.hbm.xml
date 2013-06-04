@@ -1,0 +1,89 @@
+﻿<?xml version="1.0" encoding="utf-8" ?>
+<hibernate-mapping xmlns="urn:nhibernate-mapping-2.2">
+  <class name="OrderManagement.DTO.Customer, Sample" table="Customers" lazy="false" >
+    <id name="CustomerID" type="AnsiString">
+      <column name="CustomerID" length="5" sql-type="nchar"/>
+      <generator class="assigned"/>
+    </id>
+    <property name="CompanyName">
+      <column name="CompanyName" length="40" sql-type="nvarchar"/>
+    </property>
+    <property name="ContactName">
+      <column name="ContactName" length="30" sql-type="nvarchar"/>
+    </property>
+    <property name="ContactTitle">
+      <column name="ContactTitle" length="30" sql-type="nvarchar"/>
+    </property>
+    <property name="Address">
+      <column name="Address" length="60" sql-type="nvarchar"/>
+    </property>
+    <property name="City">
+      <column name="City" length="15" sql-type="nvarchar"/>
+    </property>
+    <property name="Region">
+      <column name="Region" length="15" sql-type="nvarchar"/>
+    </property>
+    <property name="PostalCode">
+      <column name="PostalCode" length="10" sql-type="nvarchar"/>
+    </property>
+    <property name="Country">
+      <column name="Country" length="15" sql-type="nvarchar"/>
+    </property>
+    <property name="Phone">
+      <column name="Phone" length="24" sql-type="nvarchar"/>
+    </property>
+    <property name="Fax">
+      <column name="Fax" length="24" sql-type="nvarchar"/>
+    </property>
+    <bag name="Orders" inverse="true" lazy="true">
+        <key column="CustomerID"/>
+        <one-to-many class="OrderManagement.DTO.Order, Sample"/>
+    </bag>
+  </class>
+  <class name="OrderManagement.DTO.Order, Sample" table="Orders" lazy="false" >
+    <id name="OrderID">
+      <column name="OrderID" sql-type="int"/>
+      <generator class="assigned"/>
+    </id>
+    <property name="EmployeeID">
+      <column name="EmployeeID" sql-type="int"/>
+    </property>
+    <property name="OrderDate">
+      <column name="OrderDate" sql-type="datetime"/>
+    </property>
+    <property name="RequiredDate">
+      <column name="RequiredDate" sql-type="datetime"/>
+    </property>
+    <property name="ShippedDate">
+      <column name="ShippedDate" sql-type="datetime"/>
+    </property>
+    <property name="ShipVia">
+      <column name="ShipVia" sql-type="int"/>
+    </property>
+    <property name="Freight">
+      <column name="Freight" sql-type="money"/>
+    </property>
+    <property name="ShipName">
+      <column name="ShipName" length="40" sql-type="nvarchar"/>
+    </property>
+    <property name="ShipAddress">
+      <column name="ShipAddress" length="60" sql-type="nvarchar"/>
+    </property>
+    <property name="ShipCity">
+      <column name="ShipCity" length="15" sql-type="nvarchar"/>
+    </property>
+    <property name="ShipRegion">
+      <column name="ShipRegion" length="15" sql-type="nvarchar"/>
+    </property>
+    <property name="ShipPostalCode">
+      <column name="ShipPostalCode" length="10" sql-type="nvarchar"/>
+    </property>
+    <property name="ShipCountry">
+      <column name="ShipCountry" length="15" sql-type="nvarchar"/>
+    </property>
+    <many-to-one name="Customer" class="OrderManagement.DTO.Customer, Sample">
+      <column name="CustomerID" length="5" sql-type="nchar" not-null="false" index="CustomerID"/>
+    </many-to-one>
+  </class>
+</hibernate-mapping>
+
